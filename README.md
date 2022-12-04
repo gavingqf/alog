@@ -1,5 +1,5 @@
 # alog
-synchronous/asynchronous log
+synchronous/asynchronous log which outputs with a fold for a day and a file for every hour.
 ## example
 ``` 实例:
   #include "log.hpp"
