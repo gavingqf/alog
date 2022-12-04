@@ -15,6 +15,7 @@ synchronous/asynchronous log
 
 	  // set start flag
 	  debug("{}", "=== start ===");
-      ADebug("this is {} example", "alog");
+      ADebug("this is %s example", "alog");
+      Adebug("this is {} example", "alog");
     }
 ```
