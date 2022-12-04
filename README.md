@@ -2,6 +2,7 @@
 synchronous/asynchronous log
 ## example
 ``` 实例:
+  #include "log.hpp"
   void main() {
 	  // init log module
 	  anet::log::initLog("./log", "gate");
