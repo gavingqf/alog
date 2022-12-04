@@ -13,9 +13,16 @@ synchronous/asynchronous log
 		anet::log::setLogLevel(anet::log::eLogLevel::debug);
 	  }
 
-	  // set start flag
+	  // log out synchronously.
 	  debug("{}", "=== start ===");
+      
+      // log out asynchronously(A prefix).
       ADebug("this is %s example", "alog");
+
+      // the same as ADebug, just support with {}.
       Adebug("this is {} example", "alog");
+
+      // release log.
+	  anet::log::releaseLog();
     }
 ```
