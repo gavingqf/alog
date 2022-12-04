@@ -585,6 +585,7 @@ namespace anet {
         anet::log::myLog->ACrit("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
 
 	  // === {} format ===
+	  /* synchronous mode*/
 #define debug(fmt,...) { \
       if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::debug) \
         anet::log::myLog->debug("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
@@ -598,6 +599,7 @@ namespace anet {
       if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::crit) \
         anet::log::myLog->crit("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
 
+	  /*asynchronous mode*/
 #define Adebug(fmt,...) { \
       if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::debug) \
         anet::log::myLog->Adebug("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
