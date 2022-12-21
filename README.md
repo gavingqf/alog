@@ -2,7 +2,7 @@
 synchronous/asynchronous log which outputs with a fold for a day and a file for every hour.
 ## example
 ``` 实例:
-  #include "log.hpp"
+  #include "log.h"
   void main() {
 	  // init log module
 	  anet::log::initLog("./log", "gate");
