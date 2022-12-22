@@ -17,13 +17,13 @@ synchronous/asynchronous log which outputs with a fold for a day and a file for 
 	  // log out synchronously.
 	  debug("{}", "=== start ===");
       
-      // log out asynchronously(A prefix).
-      ADebug("this is %s example", "alog");
+         // log out asynchronously(A prefix).
+         ADebug("this is %s example", "alog");
 
-      // the same as ADebug, just support with {}.
-      Adebug("this is {} example", "alog");
+         // the same as ADebug, just support with {}.
+         Adebug("this is {} example", "alog");
 
-      // release log.
-	  anet::log::releaseLog();
+         // release log.
+	 anet::log::releaseLog();
     }
 ```
