@@ -3,7 +3,7 @@
 /*
 * alog is a log module which supports synchronous and asynchronous mode.
 *
-* Copyright (C) 2021-2022 gavingqf
+* Copyright (C) 2021-2022 gavingqf(gavingqf@126.com)
 *
 *    Distributed under the Boost Software License, Version 1.0.
 *    (See accompanying file LICENSE_1_0.txt or copy at
@@ -91,11 +91,11 @@ namespace anet {
 		inline const char* shortFileName(const std::string &file) {
 			// compatible for windows and Linux fold seperator.
 			const char *seperator = "/";
-#if defined(_WIN32)
+        #if defined(_WIN32)
 			seperator = "\\";
-#else
+        #else
 			seperator = "/";
-#endif
+        #endif
 			auto pos = file.rfind(seperator);
 			const char *pFile = file.c_str();
 			if (pos != size_t(-1)) {
@@ -104,7 +104,7 @@ namespace anet {
 			return pFile;
 		}
 
-		// get date string
+		// get date string as year-month-day.
 		inline char* getDateInfo(char(&data)[gLog_data_size]) {
 			auto s = getTimeInfo().first;
 			struct tm &t = *localtime(&s);
@@ -592,7 +592,7 @@ namespace anet {
                // the following macros can be visited outside.  //
                ///////////////////////////////////////////////////
              ///////////////////////////////////////////////////////
-// traditional form
+      // traditional form
 #define Debug(fmt,...) { \
       if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::debug) \
         anet::log::myLog->Debug("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
