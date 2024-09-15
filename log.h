@@ -1,7 +1,7 @@
 #pragma once
 
 /*
-* alog is a log module which supports synchronous and asynchronous mode.
+* alog is a log module which supports synchronous and asynchronous mode, and it is thread safe.
 *
 * Copyright (C) 2021-2022 gavingqf(gavingqf@126.com)
 *
@@ -22,7 +22,7 @@
 #include <cstdlib>
 #include "variable_parameter_build.h"
 #include "semaphore.hpp"
-
+#include "time.hpp"
 
  // for createDir func.
 #if defined(_WIN32)
@@ -43,12 +43,6 @@
 #include <sys/time.h>
 #define ACCESS access
 #define MKDIR(a) mkdir((a), 0755)
-// Linux like os's GetTickCount().
-inline auto GetTickCount() {
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return (ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-}
 #endif
 
   // get time info: {second, millisecond}
@@ -67,19 +61,6 @@ inline std::pair<time_t, int> getTimeInfo() {
 
 namespace anet {
 	namespace log {
-		// logger interface
-		class ILog {
-		public:
-			virtual ~ILog() {}
-
-			// log level
-			virtual bool setLevel(int level) = 0;
-			virtual void Debug(const char *format, ...) = 0;
-			virtual void Info(const char *format, ...) = 0;
-			virtual void Warn(const char *format, ...) = 0;
-			virtual void Crit(const char *format, ...) = 0;
-		};
-
 		// all kinds of const variables.
 		static constexpr int gPath_max_size = 260;
 		static constexpr int gLog_data_size = 1024;
@@ -87,16 +68,19 @@ namespace anet {
 		// write file frequency unit: ms asynchronously.
 		static constexpr int gAsyncLogWriteFrequency = 1000;
 
+		// log's asynchronous queue size.
+		static constexpr int gQueueSize = 1024;
+
 		// separate the long file to short one.
 		inline const char* shortFileName(const std::string &file) {
-			// compatible for windows and Linux fold seperator.
-			const char *seperator = "/";
+			// compatible for windows and Linux fold separator.
+			const char *separator = "/";
         #if defined(_WIN32)
-			seperator = "\\";
+			separator = "\\";
         #else
-			seperator = "/";
+			separator = "/";
         #endif
-			auto pos = file.rfind(seperator);
+			auto pos = file.rfind(separator);
 			const char *pFile = file.c_str();
 			if (pos != size_t(-1)) {
 				pFile = &file[pos + 1];
@@ -108,27 +92,30 @@ namespace anet {
 		inline char* getDateInfo(char(&data)[gLog_data_size]) {
 			auto s = getTimeInfo().first;
 			struct tm &t = *localtime(&s);
-			int n = std::snprintf(data, sizeof(data) - 1,
+			int n = std::snprintf(data, sizeof(data),
 				"%04d%02d%02d",
 				1900 + t.tm_year,
 				1 + t.tm_mon,
 				t.tm_mday
-			); data[n] = '\0';
+			);
+			(void)n;
+			assert(n > 0 && n <= int(sizeof(data)));
 			return data;
 		}
 
-		// get current time format.
+		// get current time.
 		template <size_t N>
 		inline const char* buildCurrentTime(char(&timeInfo)[N]) {
 			auto timePair = getTimeInfo();
 			auto ms = timePair.second;
 			auto s = timePair.first;
 			auto tm = localtime(&s);
-			int n = std::snprintf(timeInfo, sizeof(timeInfo) - 1,
+			int n = std::snprintf(timeInfo, sizeof(timeInfo),
 				"%d-%02d-%02d %02d:%02d:%02d.%03d",
 				1900 + tm->tm_year, tm->tm_mon + 1, tm->tm_mday,
 				tm->tm_hour, tm->tm_min, tm->tm_sec, ms
-			); timeInfo[n] = 0;
+			);
+			assert(n > 0 && n <= int(sizeof(timeInfo)));
 			return timeInfo;
 		}
 
@@ -136,13 +123,18 @@ namespace anet {
 		inline int createDir(const char *dirPath) {
 			int pathLen = int(strlen(dirPath));
 			char realTmpDir[gPath_max_size] = { 0 };
-			int minPathSize = pathLen > gPath_max_size ? gPath_max_size : pathLen;
-			strncpy(realTmpDir, dirPath, minPathSize);
+			int minPathSize = pathLen >= gPath_max_size ? gPath_max_size : pathLen;
+			strncpy(realTmpDir, dirPath, size_t(minPathSize));
 
-			// append / at tail.
-			if (dirPath[pathLen - 1] != '\\' && dirPath[pathLen - 1] != '/') {
-				realTmpDir[minPathSize] = '/';
-				realTmpDir[minPathSize + 1] = '\0';
+			// append "/" at tail the fold.
+			if (realTmpDir[minPathSize - 1] != '\\' && realTmpDir[minPathSize - 1] != '/') {
+				if (minPathSize >= gPath_max_size - 1) {
+					realTmpDir[gPath_max_size - 2] = '/';
+					realTmpDir[gPath_max_size-1] = 0;
+				} else {
+					realTmpDir[minPathSize] = '/';
+					realTmpDir[minPathSize+1] = 0;
+				}
 			}
 
 			// create if not exists it.
@@ -159,74 +151,94 @@ namespace anet {
 
 		// log level enum.
 		enum class eLogLevel : int {
-			debug = 0,
-			info,
-			warn,
-			crit,
+			debugLevel = 0,
+			infoLevel,
+			warnLevel,
+			critLevel,
 			allLevelSize,
 		};
 
 		// file format 
 		static const char *gLog_out_format = "%s [%s] %s";
 
-		// my log implementation, which can be used outside.
-		class aLog : public ILog {
+		// log implementation, which can be used outside.
+		class aLog final {
 		public:
-			explicit aLog(const std::string &foldName, 
-				const std::string &prefix, int asyncWriteTime) :
-				m_logFold(foldName), m_prefix(prefix), 
-				m_asyncToFileMs(asyncWriteTime) {
-				// assert the write to file time >= 0.
-				if (m_asyncToFileMs <= 0) {
-					m_asyncToFileMs = gAsyncLogWriteFrequency;
-				}
-
-				bool ret = initLog();
-				m_queue.reserve(1024);
-				assert(ret && "create log error");
+			explicit aLog(const std::string& filePath, const std::string& prefix, int asyncWriteTime) {
+				this->setLogInfo(filePath, prefix, asyncWriteTime);
 			}
-			explicit aLog(const std::string &foldName) : 
-				aLog(foldName, "", gAsyncLogWriteFrequency) {
+			explicit aLog(const std::string &filePath) : 
+				aLog(filePath, "log", gAsyncLogWriteFrequency) {
 			}
+			aLog() {}
 			~aLog() {
 				release_log();
 			}
 			aLog(const aLog &rhs) = delete;
-			const aLog& operator=(const aLog &rhs) = delete;
+			aLog& operator=(const aLog &rhs) = delete;
+
+		public:
+			static aLog& instance();
+
+			// init log
+			bool setLogInfo(const std::string& filePath, const std::string& prefix, 
+				int asyncWriteTime) {
+				m_logFilePath = filePath;
+				m_prefix = prefix;
+				m_quit = false;
+				m_asyncToFileMs = asyncWriteTime;
+				if (m_asyncToFileMs <= 0) {
+					m_asyncToFileMs = gAsyncLogWriteFrequency;
+				}
+				m_queue.reserve(gQueueSize);
+				return initLog();
+			}
+
+			// support base type of T.
+			// now just support the debug mode. 
+			template <typename T>
+			aLog& operator << (const T& t) {
+				using streamType = SStreamSpace::StreamStringUnlimit<64>;
+				streamType oss;
+				oss << t;
+				this->debug("%s", oss.str());
+				return *this;
+			}
 
 		public:
 			// build variable parameters.
-        #define BuildVariableFunc(fmt,level,args,ss) \
-           if (!checkLevel(level)) {                 \
-			     return;                             \
-           }                                         \
-		   variable_log(ss, fmt, std::forward<Args>(args)...);
+            #define BuildVariableFunc(fmt,level,args,ss) {        \
+               if (!checkLevel(level)) {                          \
+			       return;                                        \
+               }                                                  \
+		       variable_log(ss, fmt, std::forward<Args>(args)...);\
+		    }
 
 			// support {} as parameter.
 			// synchronous and asynchronous mode.
 			template <typename... Args>
 			void debug(const char *fmt, Args&&... args) {
 				SStreamType ss;                        
-				BuildVariableFunc(fmt, eLogLevel::debug, args, ss);
+				BuildVariableFunc(fmt, eLogLevel::debugLevel, args, ss);
 				this->Debug(ss.str());
 			}
 			template <typename... Args>
 			void Adebug(const char *fmt, Args&&... args) {
 				SStreamType ss;
-				BuildVariableFunc(fmt, eLogLevel::debug, args, ss);
+				BuildVariableFunc(fmt, eLogLevel::debugLevel, args, ss);
 				this->ADebug(ss.str());
 			}
 			// warn
 			template <typename... Args>
 			void warn(const char *fmt, Args&&... args) {
 				SStreamType ss;
-				BuildVariableFunc(fmt, eLogLevel::warn, args, ss);
+				BuildVariableFunc(fmt, eLogLevel::warnLevel, args, ss);
 				this->Warn(ss.str());
 			}
 			template <typename... Args>
 			void Awarn(const char *fmt, Args&&... args) {
 				SStreamType ss;
-				BuildVariableFunc(fmt, eLogLevel::warn, args, ss);
+				BuildVariableFunc(fmt, eLogLevel::warnLevel, args, ss);
 				this->AWarn(ss.str());
 			}
 
@@ -234,13 +246,13 @@ namespace anet {
 			template <typename... Args>
 			void info(const char *fmt, Args&&... args) {
 				SStreamType ss;
-				BuildVariableFunc(fmt, eLogLevel::info, args, ss);
+				BuildVariableFunc(fmt, eLogLevel::infoLevel, args, ss);
 				this->Info(ss.str());
 			}
 			template <typename... Args>
 			void Ainfo(const char *fmt, Args&&... args) {
 				SStreamType ss;
-				BuildVariableFunc(fmt, eLogLevel::info, args, ss);
+				BuildVariableFunc(fmt, eLogLevel::infoLevel, args, ss);
 				this->AInfo(ss.str());
 			}
 
@@ -248,35 +260,36 @@ namespace anet {
 			template <typename... Args>
 			void crit(const char *fmt, Args&&... args) {
 				SStreamType ss;
-				BuildVariableFunc(fmt, eLogLevel::crit, args, ss);
+				BuildVariableFunc(fmt, eLogLevel::critLevel, args, ss);
 				this->Crit(ss.str());
 			}
 			template <typename... Args>
 			void Acrit(const char *fmt, Args&&... args) {
 				SStreamType ss;
-				BuildVariableFunc(fmt, eLogLevel::crit, args, ss);
+				BuildVariableFunc(fmt, eLogLevel::critLevel, args, ss);
 				this->ACrit(ss.str());
 			}
 
 		public:
-			virtual bool setLevel(int level) {
-				if (level > int(eLogLevel::crit) || 
-					level < int(eLogLevel::debug)) {
+			bool setLevel(int level) {
+				if (level > int(eLogLevel::critLevel) || level < int(eLogLevel::debugLevel)) {
 					return false;
 				}
 				m_logLevel = eLogLevel(level);
 				return true;
 			}
-			eLogLevel getLevel() const {
-				return m_logLevel;
+			int getLevel() const {
+				return int(m_logLevel);
 			}
 
-			// build variadic parameter macro, adding \n at tail.
+			// build variadic parameter macro, adding "\n" at tail.
         #define buildFuncParameter(fmt,myPrintfBuf,myBufferSize) {\
 			va_list args;                                \
 			va_start(args,fmt);                          \
-			int n = std::vsnprintf(myPrintfBuf,sizeof(myPrintfBuf)-1,fmt,args);\
-			if (n <= int(sizeof(myPrintfBuf) - 2)) {     \
+			int n = std::vsnprintf(myPrintfBuf,(myBufferSize)-1,fmt,args);\
+            if (n < 0 || n > myBufferSize) return ;      \
+                                                         \
+			if (n <= int((myBufferSize) - 2)) {          \
 				(myPrintfBuf)[n] = '\n';                 \
 				(myPrintfBuf)[n+1] = 0;                  \
 			} else {                                     \
@@ -299,7 +312,7 @@ namespace anet {
 		    buildFuncParameter(fmt, myPrintfBuf, gLog_data_size);\
 				                                \
 		    char allBuff[gLog_max_size];        \
-		    std::snprintf(allBuff, sizeof(allBuff) - 1, gLog_out_format, timeInfo, getLevelInfo(level), myPrintfBuf); \
+		    std::snprintf(allBuff, sizeof(allBuff), gLog_out_format, timeInfo, getLevelInfo(level), myPrintfBuf); \
 		    this->write(allBuff);               \
           }
 
@@ -316,44 +329,44 @@ namespace anet {
 		    buildFuncParameter(fmt, myPrintfBuf, gLog_data_size);\
 				                                \
 		    char allBuff[gLog_max_size];        \
-		    std::snprintf(allBuff, sizeof(allBuff) - 1, gLog_out_format, timeInfo, getLevelInfo(level), myPrintfBuf); \
+		    std::snprintf(allBuff, sizeof(allBuff)-1, gLog_out_format, timeInfo, getLevelInfo(level), myPrintfBuf); \
 		    this->pushQueue(allBuff);           \
           }
 
 		public:
 			// synchronous interfaces.
-			virtual void Debug(const char *fmt, ...) override {
-				LevelOutput(fmt, eLogLevel::debug);
+			void Debug(const char *fmt, ...) {
+				LevelOutput(fmt, eLogLevel::debugLevel);
 			}
-			virtual void Info(const char *fmt, ...) override {
-				LevelOutput(fmt, eLogLevel::info);
+			void Info(const char *fmt, ...) {
+				LevelOutput(fmt, eLogLevel::infoLevel);
 			}
-			virtual void Warn(const char *fmt, ...) override {
-				LevelOutput(fmt, eLogLevel::warn);
+			void Warn(const char *fmt, ...) {
+				LevelOutput(fmt, eLogLevel::warnLevel);
 			}
-			virtual void Crit(const char *fmt, ...) override {
-				LevelOutput(fmt, eLogLevel::crit);
+			void Crit(const char *fmt, ...) {
+				LevelOutput(fmt, eLogLevel::critLevel);
 			}
 
 			// asynchronous interfaces
 			void ADebug(const char *fmt, ...) {
-				ALevelOutput(fmt, eLogLevel::debug);
+				ALevelOutput(fmt, eLogLevel::debugLevel);
 			}
 			void AInfo(const char *fmt, ...) {
-				ALevelOutput(fmt, eLogLevel::info);
+				ALevelOutput(fmt, eLogLevel::infoLevel);
 			}
 			void AWarn(const char *fmt, ...) {
-				ALevelOutput(fmt, eLogLevel::warn);
+				ALevelOutput(fmt, eLogLevel::warnLevel);
 			}
 			void ACrit(const char *fmt, ...) {
-				ALevelOutput(fmt, eLogLevel::crit);
+				ALevelOutput(fmt, eLogLevel::critLevel);
 			}
 
 		protected:
-			// pushQueue pushes log to the asynchronous queue.
-			void pushQueue(const std::string &log) {
+			// pushQueue pushes log message to the asynchronous queue.
+			void pushQueue(const std::string &msg) {
 				m_asyncMutex.lock();
-				m_queue.append(std::move(log));
+				m_queue.append(msg);
 				m_asyncMutex.unlock();
 
 				// signal that the semaphore is ready.
@@ -363,14 +376,14 @@ namespace anet {
 			// thread function to write the queue's message to the local file.
 			void threadFunc() {
 				std::string swapQueue;
-				swapQueue.reserve(1024);
-				long long lastLogTime = GetTickCount();
-				while(!m_quit) {
+				swapQueue.reserve(gQueueSize);
+				long long lastLogTime = GetNowMSTime();
+				while (!m_quit) {
 					// wait for notify or time out after the delayTime time.
 					m_sem.wait_for(std::chrono::milliseconds(m_asyncToFileMs));
 	
 					// real time check.
-					auto nowTime = GetTickCount();
+					auto nowTime = GetNowMSTime();
 			        if (nowTime - lastLogTime < m_asyncToFileMs) {
 						continue;
 					}
@@ -419,6 +432,7 @@ namespace anet {
 				}
 
 				std::lock_guard<std::mutex> guard(m_mutex);
+
 				// check whether the date is changed.
 				if (!isTheSameDate()) {
 					// close before file.
@@ -426,21 +440,31 @@ namespace anet {
 						fclose(m_fileStream);
 						m_fileStream = nullptr;
 					}
+
 					// create subFold;
 					char data[gLog_data_size];
-					auto &&subFold = m_logFold + "/" + getDateInfo(data);
-					createDir(subFold.c_str());
+					auto &&subFold = m_logFilePath + "/" + getDateInfo(data);
+					if (createDir(subFold.c_str()) < 0) {
+						return;
+					}
+
 					// create a log file.
-					createFile();
+					if (!createFile()) {
+						return;
+					}
 				}
 
 				// window's output
-            #ifdef _WIN32
-				printf("%s", content);
-            #endif
-				// log file output
-				fputs(content, m_fileStream);
-				fflush(m_fileStream);
+                #ifdef _WIN32
+				  printf("%s", content);
+                #endif
+
+				assert(m_fileStream != nullptr && "file stream is nullptr");
+				if (m_fileStream != nullptr) {
+					// log file output
+					fputs(content, m_fileStream);
+					fflush(m_fileStream);
+				}
 			}
 
 			inline const char* getLevelInfo(eLogLevel level) const {
@@ -450,21 +474,20 @@ namespace anet {
 			// initLog initializes the log module.
 			bool initLog() {
 				// create directory
-				if (createDir(m_logFold.c_str()) < 0) {
+				if (createDir(m_logFilePath.c_str()) < 0) {
 					return false;
 				}
 
 				// create sub directory.
 				char dateBuff[gLog_data_size];
-				auto &&subFold = m_logFold + "/" + getDateInfo(dateBuff);
+				auto &&subFold = m_logFilePath + "/" + getDateInfo(dateBuff);
 				if (createDir(subFold.c_str()) < 0) {
 					return false;
 				}
 
-				// create log file.
+				// create the log file.
 				if (createFile()) {
-					// start thread to deal asynchronous log
-					this->m_th = std::make_unique<std::thread>(std::bind(&aLog::threadFunc, this));
+					m_th = std::make_unique<std::thread>(std::bind(&aLog::threadFunc, this));
 					return true;
 				} else {
 					return false;
@@ -488,14 +511,15 @@ namespace anet {
 				/* file name */
 				char data[gLog_data_size];
 				int n = std::snprintf(fileName,
-					sizeof(fileName) - 1,
+					sizeof(fileName),
 					"%s/%s/%s%04d%02d%02d_%02d.log",
-					m_logFold.c_str(),
+					m_logFilePath.c_str(),
 					getDateInfo(data),
 					m_prefix.c_str(),
 					1900 + tm->tm_year, tm->tm_mon + 1, tm->tm_mday,
 					tm->tm_hour
-				); fileName[n] = 0;
+				);
+				assert(n > 0 && n <= int(sizeof(fileName)));
 				m_fileStream = fopen(fileName, "a+");
 				return m_fileStream != nullptr;
 			}
@@ -506,6 +530,7 @@ namespace anet {
 				m_quit = true;
 				m_th->join();
 
+				// then close file handler.
 				m_mutex.lock();
 				if (m_fileStream != nullptr) {
 					fclose(m_fileStream);
@@ -520,19 +545,19 @@ namespace anet {
 
 		private:
 			// file handle and its mutex.
-			FILE* m_fileStream;
+			FILE* m_fileStream{ nullptr };
 			mutable std::mutex m_mutex;
 
 			// log level info.
 			const char* m_levels[int(eLogLevel::allLevelSize)] = { "debg","info","warn","crit" };
-			eLogLevel m_logLevel{ eLogLevel::debug };
+			eLogLevel m_logLevel{ eLogLevel::debugLevel };
 
 			// log time info(year,month,day,hour).
 			int m_year;
 			int m_month;
 			int m_day;
 			int m_hour;
-			std::string    m_logFold;
+			std::string    m_logFilePath;
 			std::string    m_prefix;
 
 			// asynchronous log info
@@ -541,13 +566,10 @@ namespace anet {
 			mutable std::mutex m_asyncMutex;
 			std::string m_queue;
 			bool m_quit{ false };
+
 			// the frequency(unit:ms) to write message to file handler.
 			int m_asyncToFileMs{ gAsyncLogWriteFrequency };
 		}; // end of aLog class
-
-
-		// global log pointer, please initLog() to init it if you wish to use it.
-		extern aLog *myLog;
 
 
 		// initLog initializes the log module,
@@ -555,97 +577,97 @@ namespace anet {
 		// level is default log level, 
 		// and asyncWriteMSTime is the time to write to log handler.
 		inline bool initLog(std::string foldName, std::string logName,
-			eLogLevel level = eLogLevel::debug, 
+			eLogLevel level = eLogLevel::debugLevel,
 			int asyncWriteMSTime = gAsyncLogWriteFrequency
 		) {
-			if (myLog != nullptr) {
+			if (!aLog::instance().setLogInfo(foldName, logName, asyncWriteMSTime)) {
 				return false;
 			}
-			myLog = new aLog(foldName, logName, asyncWriteMSTime);
-			myLog->setLevel(int(level));
-			return true;
+			return aLog::instance().setLevel(int(level));
 		}
 
 		// setLogLevel sets log level
 		inline bool setLogLevel(eLogLevel level) {
-			if (myLog != nullptr) {
-				myLog->setLevel(int(level));
-				return true;
-			} else {
-				return false;
-			}
-			
+			return aLog::instance().setLevel(int(level));
 		}
 
 		// releaseLog releases log module.
-		inline void releaseLog() {
-			if (myLog != nullptr) {
-				delete myLog;
-				myLog = nullptr;
-			}
-		}
-	} // end of the log namespace.
-} // end of anet namespace
-
+		inline void releaseLog() {}
              ///////////////////////////////////////////////////////
                ///////////////////////////////////////////////////
                // the following macros can be visited outside.  //
                ///////////////////////////////////////////////////
              ///////////////////////////////////////////////////////
+#define LoggerDebug(log,fmt,...) { \
+      if (log != nullptr && log->getLevel() <= int(anet::log::eLogLevel::debugLevel)) \
+        log->Debug("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define LoggerWarn(log,fmt,...) { \
+      if (log != nullptr && log->getLevel() <= int(anet::log::eLogLevel::warnLevel)) \
+	    log->Warn("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+#define LoggerInfo(fmt,...) { \
+      if (log != nullptr && log->.getLevel() <= int(anet::log::eLogLevel::infoLevel)) \
+        log->Info("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+#define LoggerCrit(log,fmt,...) { \
+      if (log != nullptr && log->getLevel() <= int(anet::log::eLogLevel::critLevel)) \
+        log->Crit("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+
       // traditional form
-#define Debug(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::debug) \
-        anet::log::myLog->Debug("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
-#define Warn(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::warn) \
-	    anet::log::myLog->Warn("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
-#define Info(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::info) \
-        anet::log::myLog->Info("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
-#define Crit(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::crit) \
-        anet::log::myLog->Crit("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+#define LogDebug(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::debugLevel)) \
+        anet::log::aLog::instance().Debug("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define LogWarn(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::warnLevel)) \
+	    anet::log::aLog::instance().Warn("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+#define LogInfo(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::infoLevel)) \
+        anet::log::aLog::instance().Info("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+#define LogCrit(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::critLevel)) \
+        anet::log::aLog::instance().Crit("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
 
 	  // ==asynchronous mode ==
-#define ADebug(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::debug) \
-        anet::log::myLog->ADebug("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
-#define AWarn(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::warn) \
-        anet::log::myLog->AWarn("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
-#define AInfo(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::info) \
-        anet::log::myLog->AInfo("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
-#define ACrit(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::crit) \
-        anet::log::myLog->ACrit("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+#define LogADebug(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::debugLevel)) \
+        anet::log::aLog::instance().ADebug("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+#define LogAWarn(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::warnLevel)) \
+        anet::log::aLog::instance().AWarn("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+#define LogAInfo(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::infoLevel)) \
+        anet::log::aLog::instance().AInfo("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
+#define LogACrit(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::critLevel)) \
+        anet::log::aLog::instance().ACrit("%s %s:%d " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__); }
 
 	  // === {} format ===
 	  /*synchronous mode*/
-#define debug(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::debug) \
-        anet::log::myLog->debug("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
-#define warn(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::warn) \
-        anet::log::myLog->warn("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
-#define info(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::info) \
-        anet::log::myLog->info("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
-#define crit(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::crit) \
-        anet::log::myLog->crit("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define Logdebug(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::debugLevel)) \
+        anet::log::aLog::instance().debug("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define Logwarn(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::warnLevel)) \
+        anet::log::aLog::instance().warn("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define Loginfo(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::infoLevel)) \
+        anet::log::aLog::instance().info("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define Logcrit(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::critLevel)) \
+        anet::log::aLog::instance().crit("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
 
 	  /*asynchronous mode*/
-#define Adebug(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::debug) \
-        anet::log::myLog->Adebug("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
-#define Awarn(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::warn) \
-        anet::log::myLog->Awarn("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
-#define Ainfo(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::info) \
-        anet::log::myLog->Ainfo("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
-#define Acrit(fmt,...) { \
-      if (anet::log::myLog != nullptr && anet::log::myLog->getLevel() <= anet::log::eLogLevel::crit) \
-        anet::log::myLog->Acrit("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define LogAdebug(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::debugLevel)) \
+        anet::log::aLog::instance().Adebug("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define LogAwarn(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::warnLevel)) \
+        anet::log::aLog::instance().Awarn("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define LogAinfo(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::infoLevel)) \
+        anet::log::aLog::instance().Ainfo("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+#define LogAcrit(fmt,...) { \
+      if (anet::log::aLog::instance().getLevel() <= int(anet::log::eLogLevel::critLevel)) \
+        anet::log::aLog::instance().Acrit("{} {}:{} " fmt, anet::log::shortFileName(__FILE__), __FUNCTION__, __LINE__, ##__VA_ARGS__);}
+	
+    } // end of the log namespace.
+} // end of anet namespace
 		  

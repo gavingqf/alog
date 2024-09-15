@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * stream string class
+ * stream string class: support the base format(%d,%s,%p,...)
  */
 
 #include <string>
@@ -141,7 +141,7 @@ namespace SStreamSpace {
 				flag = 1;
 			}
 			sizeCheck(size);
-			sprintf(&m_vecBuffer[m_pos], format, (flag == 0? pData : pSrc));
+			std::sprintf(&m_vecBuffer[m_pos], format, (flag == 0? pData : pSrc));
 			m_pos += size;
 
 			return *this;
@@ -191,8 +191,9 @@ namespace SStreamSpace {
 		virtual StreamStringUnlimit &To(const char *data, size_t dateLen) {
 			// size check.
 			sizeCheck(int(dateLen));
+
 			// just copy it
-			memcpy(&m_vecBuffer[m_pos], data, dateLen);
+			memcpy(&m_vecBuffer[m_pos], data, int(dateLen));
 			m_pos += int(dateLen);
 
 			return *this;
@@ -209,7 +210,8 @@ namespace SStreamSpace {
 	// stream string with out buffer.
 	class StreamStringex {
 	public:
-		explicit StreamStringex(char *pszBuff, int nBuffSize, const char *pszInitBuff = nullptr) {
+		explicit StreamStringex(char *pszBuff, int nBuffSize, 
+			const char *pszInitBuff = nullptr) {
 			m_pBuf = pszBuff;
 			m_maxSize = nBuffSize;
 			assert(m_pBuf && "buffer is null");

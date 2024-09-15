@@ -35,6 +35,9 @@ namespace anet {
 		// recurse call back.
 		static void _sm_log_output(SStreamType &ss, const std::vector<std::string>& format, 
 			size_t& index) {
+			(void)ss;
+			(void)index;
+			(void)format;
 		}
 
 		template<typename T, typename... Args>
@@ -52,6 +55,7 @@ namespace anet {
 		template<typename... Args>
 		inline void variable_log(SStreamType &ss, const char* format, Args&&... args) {
 			std::vector<std::string> vec;
+			vec.reserve(8);
 			split(format, DELIM, vec);
 
 			// variadic parameter format.
